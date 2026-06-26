@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv / pip
+uv.lock
+
+# Downloaded media (temp and output)
+_tmp_video.mp4
+_tmp_audio.mp4
+output_video.mp4
+*.mp4
+*.webm
+*.m4a
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

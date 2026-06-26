@@ -1,0 +1,21 @@
+[project]
+name = "reelshort"
+version = "0.1.0"
+description = "Download YouTube videos (including Shorts) with audio via pytubefix + ffmpeg"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pytubefix>=10.10.1",
+    "streamlit>=1.46.0",
+]
+
+[project.scripts]
+reelshort = "main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+include = ["main.py", "ui.py"]

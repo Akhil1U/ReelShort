@@ -1,0 +1,2 @@
+pytubefix>=10.10.1
+streamlit>=1.46.0
