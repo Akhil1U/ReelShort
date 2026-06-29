@@ -27,41 +27,63 @@ BASE_HEADERS = {
     "X-Requested-With": "XMLHttpRequest",
 }
 
-# GraphQL document ID for fetching shortcode media — same one the Instagram
-# web app uses internally.
 GRAPHQL_DOC_ID = "10015901848480474"
 GRAPHQL_URL = "https://www.instagram.com/graphql/query"
 
 
 def _make_session() -> requests.Session:
     """
-    Creates a warmed-up requests Session by first visiting instagram.com
-    to collect real cookies (csrftoken, ig_did, mid, etc.).
+    Builds a requests Session for Instagram API calls.
 
-    Instagram returns 401 from cloud/datacenter IPs when these cookies are
-    absent. Doing a quick homepage visit fixes this — the same technique
-    used by every online reel downloader running on a server.
+    Strategy (in order):
+    1. If INSTAGRAM_SESSION_ID env var is set → use it as the sessionid cookie.
+       This is required on cloud/datacenter IPs (Render, AWS, etc.) because
+       Instagram returns 401 for anonymous requests from those IPs.
+    2. Otherwise → do an anonymous homepage warm-up to collect csrftoken etc.
+       This works on residential/local IPs but will likely fail on cloud hosts.
+
+    How to get your session ID:
+      - Log into Instagram in your browser.
+      - Open DevTools (F12) → Application → Cookies → instagram.com
+      - Copy the value of the 'sessionid' cookie.
+      - Set it as INSTAGRAM_SESSION_ID in your Render environment variables.
     """
     session = requests.Session()
     session.headers.update(BASE_HEADERS)
 
-    # Warm-up: fetch the lightweight mobile homepage to get session cookies.
-    # We request the mobile site (smaller HTML) just to grab cookies fast.
-    try:
-        warmup = session.get(
-            "https://www.instagram.com/",
-            headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
-            timeout=10,
-            allow_redirects=True,
-        )
-        # Grab csrftoken from cookie jar and inject it as a header too
-        csrf = session.cookies.get("csrftoken", "")
-        if csrf:
-            session.headers.update({"X-CSRFToken": csrf})
-    except Exception:
-        # If warm-up fails for any reason, continue anyway —
-        # the GraphQL call might still succeed.
-        pass
+    session_id = os.environ.get("INSTAGRAM_SESSION_ID", "").strip()
+
+    if session_id:
+        # Authenticated mode: inject the real session cookie.
+        # Instagram trusts logged-in sessions from any IP, including datacenters.
+        session.cookies.set("sessionid", session_id, domain=".instagram.com")
+        # Still do a lightweight warm-up to pick up csrftoken
+        try:
+            warmup = session.get(
+                "https://www.instagram.com/",
+                headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+                timeout=10,
+                allow_redirects=True,
+            )
+            csrf = session.cookies.get("csrftoken", "")
+            if csrf:
+                session.headers.update({"X-CSRFToken": csrf})
+        except Exception:
+            pass
+    else:
+        # Anonymous mode: works on residential IPs, may 401 on cloud hosts.
+        try:
+            warmup = session.get(
+                "https://www.instagram.com/",
+                headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.8"},
+                timeout=10,
+                allow_redirects=True,
+            )
+            csrf = session.cookies.get("csrftoken", "")
+            if csrf:
+                session.headers.update({"X-CSRFToken": csrf})
+        except Exception:
+            pass
 
     return session
 
@@ -99,10 +121,9 @@ def get_video_url(shortcode: str) -> str:
     """
     Fetches the direct MP4 video URL from Instagram's internal GraphQL API.
 
-    Works from both local and cloud/server IPs by first warming up a session
-    with Instagram cookies (csrftoken etc.) before hitting the API — this
-    prevents the 401 Unauthorized that cloud IPs receive when calling the
-    GraphQL endpoint cold.
+    Requires INSTAGRAM_SESSION_ID env var on cloud deployments (Render, etc.)
+    because Instagram blocks anonymous requests from datacenter IPs with 401.
+    Works anonymously on local/residential IPs.
     """
     session = _make_session()
 
@@ -110,13 +131,28 @@ def get_video_url(shortcode: str) -> str:
         "doc_id": GRAPHQL_DOC_ID,
         "variables": json.dumps({"shortcode": shortcode}),
     }
-    resp = session.get(
-        GRAPHQL_URL,
-        params=params,
-        headers={"Accept": "application/json"},
-        timeout=15,
-    )
-    resp.raise_for_status()
+
+    try:
+        resp = session.get(
+            GRAPHQL_URL,
+            params=params,
+            headers={"Accept": "application/json"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 401:
+            raise RuntimeError(
+                "Instagram returned 401 Unauthorized. "
+                "This usually means the app is running on a cloud server whose IP "
+                "Instagram doesn't trust for anonymous requests.\n\n"
+                "Fix: Set the INSTAGRAM_SESSION_ID environment variable in Render:\n"
+                "  1. Log into Instagram in your browser.\n"
+                "  2. Open DevTools (F12) → Application → Cookies → instagram.com\n"
+                "  3. Copy the 'sessionid' cookie value.\n"
+                "  4. Add it as INSTAGRAM_SESSION_ID in your Render service → Environment."
+            ) from e
+        raise
 
     data = resp.json()
     video_url = find_nested(data, "video_url")
@@ -131,7 +167,7 @@ def get_video_url(shortcode: str) -> str:
 
 def download_reel(reel_url: str):
     """
-    Downloads a public Instagram Reel without login or cookies.
+    Downloads a public Instagram Reel.
     Saves the file as <shortcode>.mp4 in the current directory.
     """
     try:
@@ -142,11 +178,9 @@ def download_reel(reel_url: str):
         print("[*] Video URL found. Downloading...")
 
         final_filename = f"{shortcode}.mp4"
-
         session = requests.Session()
         session.headers.update(BASE_HEADERS)
 
-        # Stream-download to handle large files efficiently
         with session.get(video_url, stream=True, timeout=60) as r:
             r.raise_for_status()
             total = int(r.headers.get("content-length", 0))
@@ -167,7 +201,7 @@ def download_reel(reel_url: str):
                                 flush=True,
                             )
 
-        print()  # newline after progress bar
+        print()
         size_mb = os.path.getsize(final_filename) / (1024 * 1024)
         print(f"[+] Done! Saved as: {final_filename}  ({size_mb:.1f} MB)")
         return final_filename
@@ -191,8 +225,7 @@ def download_reel(reel_url: str):
 #   Interactive:   python reel.py
 #   With URL arg:  python reel.py "https://www.instagram.com/reel/..."
 #
-# Always wrap URLs in quotes on the command line — the '&' in the query
-# string is a shell operator and will break the command if left unquoted.
+# For cloud deployments, set: INSTAGRAM_SESSION_ID=<your sessionid cookie>
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     if len(sys.argv) > 1:
